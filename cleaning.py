@@ -3,6 +3,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QTableWidget, QTableWidge
 import sys
 import numpy as np
 from typing import Tuple, List
+import os
 
 # Second, all data structures
 region_to_countries = {
@@ -214,8 +215,14 @@ def assign_default_route() -> Tuple[str, str, str, str, str, float]:
             for port in ports.keys():
                 all_ports.append((country, port))
     
+    # Ensure we have valid ports to choose from
+    if not all_ports:
+        return ('Singapore', 'Singapore', 'China', 'Shanghai', 'General Cargo', 0.0)
+    
     origin_idx = np.random.randint(0, len(all_ports))
     dest_idx = np.random.randint(0, len(all_ports))
+    while dest_idx == origin_idx:  # Ensure different ports
+        dest_idx = np.random.randint(0, len(all_ports))
     
     origin = all_ports[origin_idx]
     dest = all_ports[dest_idx]
@@ -226,130 +233,153 @@ def assign_default_route() -> Tuple[str, str, str, str, str, float]:
         dest[0],
         dest[1],
         'General Cargo',
-        0.0
+        np.random.uniform(1000, 5000)  # Reasonable default weight
     )
 
-def load_vessel_type_mapping(mapping_file="VesselTypeCodes_Structured.csv"):
+def load_vessel_type_mapping(mapping_file="inputs/VesselTypeCodes_Structured.csv"):
     """
     Load vessel type mapping from CSV file
     Returns two dictionaries: one for vessel groups and one for detailed classifications
     """
-    mapping_df = pd.read_csv(mapping_file)
-    
-    # Create empty dictionaries for the mappings
-    group_mapping = {}
-    type_mapping = {}
-    
-    # Iterate through the mapping DataFrame to handle ranges
-    for _, row in mapping_df.iterrows():
-        code_str = str(row['AIS Vessel Code'])
-        group = row['Vessel Group (2018)']
-        type_detail = row['AIS Ship & Cargo Classification']
+    try:
+        mapping_df = pd.read_csv(mapping_file)
         
-        # Handle ranges (e.g., "1-19")
-        if '-' in code_str:
-            start, end = map(int, code_str.split('-'))
-            for code in range(start, end + 1):
-                group_mapping[code] = group
-                type_mapping[code] = type_detail
-        else:
-            # Handle single values
-            try:
-                code = int(code_str)
-                group_mapping[code] = group
-                type_mapping[code] = type_detail
-            except ValueError:
-                print(f"Warning: Could not convert '{code_str}' to integer")
-    
-    # Debug print to check the mappings
-    print("\nFirst few entries in group_mapping:", dict(list(group_mapping.items())[:3]))
-    
-    return group_mapping, type_mapping
+        # Create empty dictionaries for the mappings
+        group_mapping = {}
+        type_mapping = {}
+        
+        # Iterate through the mapping DataFrame to handle ranges
+        for _, row in mapping_df.iterrows():
+            code_str = str(row['AIS Vessel Code'])
+            group = row['Vessel Group (2018)']
+            type_detail = row['AIS Ship & Cargo Classification']
+            
+            # Handle ranges (e.g., "1-19")
+            if '-' in code_str:
+                start, end = map(int, code_str.split('-'))
+                for code in range(start, end + 1):
+                    group_mapping[code] = group
+                    type_mapping[code] = type_detail
+            else:
+                # Handle single values
+                try:
+                    code = int(code_str)
+                    group_mapping[code] = group
+                    type_mapping[code] = type_detail
+                except ValueError:
+                    print(f"Warning: Could not convert '{code_str}' to integer")
+        
+        print("\nVessel type mapping loaded successfully")
+        print(f"Total vessel codes mapped: {len(group_mapping)}")
+        print("\nSample mappings:")
+        sample_codes = list(group_mapping.keys())[:3]
+        for code in sample_codes:
+            print(f"Code {code}: Group={group_mapping[code]}, Type={type_mapping[code]}")
+        
+        return group_mapping, type_mapping
+        
+    except Exception as e:
+        print(f"Error loading vessel type mapping: {str(e)}")
+        raise
 
-def load_and_clean_ais_data(file_path):
-    # Read the CSV file
-    df = pd.read_csv(file_path)
-    
-    print(f"Number of rows before cleaning: {len(df)}")
-    
-    # Debug print to check VesselType values
-    print("\nUnique VesselType values:", df['VesselType'].unique())
-    
-    # Load vessel type mappings
-    vessel_group_mapping, vessel_type_mapping = load_vessel_type_mapping()
-    
-    # Convert BaseDateTime to datetime type
-    df['BaseDateTime'] = pd.to_datetime(df['BaseDateTime'])
-    
-    # Convert VesselType to int and handle any conversion errors
-    df['VesselType'] = df['VesselType'].astype(float).astype('Int64')
-    
-    # Debug print after conversion
-    print("\nUnique VesselType values after conversion:", df['VesselType'].unique())
-    
-    # Add vessel group and detailed type based on vessel code
-    df['VesselGroup'] = df['VesselType'].map(vessel_group_mapping)
-    df['VesselTypeDetailed'] = df['VesselType'].map(vessel_type_mapping)
-    
-    # Sort by MMSI and BaseDateTime to ensure we get the latest reading
-    df = df.sort_values(['MMSI', 'BaseDateTime'])
-    
-    # Get the last reading for each vessel (MMSI)
-    latest_readings = df.drop_duplicates(subset=['MMSI'], keep='last')
-    
-    print(f"Number of rows after initial cleaning: {len(latest_readings)}")
-    
-    # Fill any missing vessel types with 'Not Available'
-    latest_readings['VesselGroup'] = latest_readings['VesselGroup'].fillna('Not Available')
-    latest_readings['VesselTypeDetailed'] = latest_readings['VesselTypeDetailed'].fillna('Not Available')
-    
-    # Remove rows where either column contains 'Not Available' (case insensitive)
-    # or VesselTypeDetailed contains 'Reserved for future use'
-    latest_readings = latest_readings[
-        ~(latest_readings['VesselGroup'].str.lower().str.contains('not available')) &
-        ~(latest_readings['VesselTypeDetailed'].str.lower().str.contains('not available')) &
-        ~(latest_readings['VesselTypeDetailed'].str.contains('Reserved for future use'))
-    ]
-    
-    print(f"Number of rows after cleaning: {len(latest_readings)}")
-    
-    # Reset the index
-    latest_readings = latest_readings.reset_index(drop=True)
-    
-    # Add synthetic route and cargo data
-    print("\nGenerating synthetic route and cargo data...")
-    
-    # Debug print to check vessel groups before assignment
-    print("\nUnique vessel groups before assignment:", latest_readings['VesselGroup'].unique())
-    
-    # Create new columns from the assign_route_and_cargo function
-    route_cargo_data = []
-    for _, row in latest_readings.iterrows():
-        # Debug print for each vessel
-        print(f"Processing vessel group: {row['VesselGroup']}")
-        result = assign_route_and_cargo(row['VesselGroup'], row['VesselTypeDetailed'])
-        route_cargo_data.append(result)
-    
-    # Unpack the returned tuples into separate columns
-    (
-        latest_readings['Origin_country'],
-        latest_readings['Origin_port'],
-        latest_readings['Destination_country'],
-        latest_readings['Destination_port'],
-        latest_readings['Cargo_type'],
-        latest_readings['Total_weight_cargo']
-    ) = zip(*route_cargo_data)
-    
-    # Debug print to check final cargo distribution
-    print("\nCargo type distribution:")
-    print(latest_readings['Cargo_type'].value_counts())
-    
-    # Add flag data
-    latest_readings['Flag'] = latest_readings['VesselGroup'].apply(assign_flag)
-    
-    print("Synthetic data generation complete.")
-    
-    return latest_readings
+def load_and_clean_ais_data(file_path="inputs/AIS_2023_12_31.csv"):
+    """Load and clean AIS data with vessel type mapping"""
+    try:
+        print("Loading data...")
+        df = pd.read_csv(file_path)
+        n_vessels_initial = len(df)
+        
+        print(f"Initial number of records: {n_vessels_initial}")
+        
+        # Remove rows where Vessel Name is NULL
+        print("Removing records with NULL vessel names...")
+        df = df.dropna(subset=['VesselName'])
+        
+        # Sort by MMSI and BaseDateTime to ensure we get the latest reading
+        print("Sorting data by MMSI and timestamp...")
+        df['BaseDateTime'] = pd.to_datetime(df['BaseDateTime'])
+        df = df.sort_values(['MMSI', 'BaseDateTime'])
+        
+        # Get the last reading for each vessel (MMSI)
+        print("Filtering to latest position for each vessel...")
+        df = df.drop_duplicates(subset=['MMSI'], keep='last')
+        
+        # Drop the 'Cargo' column if it exists
+        if 'Cargo' in df.columns:
+            df = df.drop(columns=['Cargo'])
+        
+        # Rest of the cleaning process...
+        n_vessels = len(df)
+        print(f"Number of unique vessels: {n_vessels}")
+        
+        # Load vessel type mappings
+        vessel_group_mapping, vessel_type_mapping = load_vessel_type_mapping()
+        
+        print("Basic cleaning...")
+        # Vectorized basic cleaning
+        df['VesselType'] = df['VesselType'].astype(float).astype('Int64')
+        df['VesselGroup'] = df['VesselType'].map(vessel_group_mapping)
+        df['VesselTypeDetailed'] = df['VesselType'].map(vessel_type_mapping)
+        
+        # Convert VesselGroup to numpy array of strings
+        vessel_groups = df['VesselGroup'].astype(str).values
+        valid_mask = vessel_groups != 'Not Available'
+        
+        # Pre-allocate arrays for results
+        origin_countries = np.full(n_vessels, 'Unknown', dtype=object)
+        dest_countries = np.full(n_vessels, 'Unknown', dtype=object)
+        origin_ports = np.full(n_vessels, 'Unknown', dtype=object)
+        dest_ports = np.full(n_vessels, 'Unknown', dtype=object)
+        cargo_types = np.full(n_vessels, 'Unknown', dtype=object)
+        weights = np.zeros(n_vessels)
+        
+        # Convert lookup dictionaries to arrays for faster access
+        all_countries = np.array(list(region_to_countries['Global']))
+        
+        print("Processing vessels in bulk...")
+        # Process all valid vessels at once
+        valid_indices = np.where(valid_mask)[0]
+        n_valid = len(valid_indices)
+        
+        if n_valid > 0:
+            # Process each vessel individually for accurate cargo and weight assignment
+            for idx in valid_indices:
+                vessel_group = vessel_groups[idx]
+                vessel_type_detailed = df['VesselTypeDetailed'].iloc[idx]
+                
+                # Use the assign_route_and_cargo function for each vessel
+                (
+                    origin_countries[idx],
+                    origin_ports[idx],
+                    dest_countries[idx],
+                    dest_ports[idx],
+                    cargo_types[idx],
+                    weights[idx]
+                ) = assign_route_and_cargo(vessel_group, vessel_type_detailed)
+        
+        print("Assigning results to DataFrame...")
+        # Assign results back to DataFrame all at once
+        df['Origin_country'] = origin_countries
+        df['Destination_country'] = dest_countries
+        df['Origin_port'] = origin_ports
+        df['Destination_port'] = dest_ports
+        df['Cargo_type'] = cargo_types
+        df['Total_weight_cargo'] = weights
+        df['Flag'] = df['VesselGroup'].apply(assign_flag)
+        
+        print("\nProcessing complete. Generating statistics...")
+        print(f"Total vessels processed: {len(df)}")
+        print(f"Valid vessels: {n_valid}")
+        print("\nOrigin Country Distribution (top 5):")
+        print(df['Origin_country'].value_counts().head())
+        print("\nCargo Type Distribution (top 5):")
+        print(df['Cargo_type'].value_counts().head())
+        
+        return df
+        
+    except Exception as e:
+        print(f"Error in load_and_clean_ais_data: {str(e)}")
+        raise
 
 class DataFrameViewer(QMainWindow):
     def __init__(self, df):
@@ -376,56 +406,6 @@ class DataFrameViewer(QMainWindow):
         
         # Resize columns to content
         self.table.resizeColumnsToContents()
-
-def select_cargo_type(vessel_group: str, origin_country: str, dest_country: str) -> str:
-    """Select cargo type based on vessel group and real-world cargo flows"""
-    if vessel_group == 'Oil Tanker':
-        if origin_country in ['Saudi Arabia', 'UAE', 'Kuwait', 'Qatar', 'Oman']:
-            return np.random.choice(['Crude Oil', 'Petroleum Products'], p=[0.95, 0.05])  # Middle East mainly exports crude
-        elif origin_country in ['Singapore', 'South Korea', 'Netherlands']:
-            return np.random.choice(['Petroleum Products', 'Fuel Oil'], p=[0.80, 0.20])  # Refining hubs
-        return np.random.choice(['Crude Oil', 'Petroleum Products', 'Fuel Oil'], p=[0.70, 0.20, 0.10])
-    
-    elif vessel_group == 'Bulk Carrier':
-        if origin_country == 'Australia':
-            return np.random.choice(['Iron Ore', 'Coal', 'Bauxite'], p=[0.70, 0.25, 0.05])  # Major iron ore exporter
-        elif origin_country == 'Brazil':
-            return np.random.choice(['Iron Ore', 'Soybeans', 'Grain'], p=[0.80, 0.15, 0.05])  # World's largest iron ore exporter
-        elif origin_country in ['USA', 'Canada']:
-            return np.random.choice(['Grain', 'Soybeans', 'Coal'], p=[0.50, 0.30, 0.20])  # Major grain exporters
-        elif origin_country == 'South Africa':
-            return np.random.choice(['Coal', 'Iron Ore', 'Manganese'], p=[0.60, 0.25, 0.15])
-        return np.random.choice(['Coal', 'Grain', 'Iron Ore', 'Bauxite'], p=[0.35, 0.30, 0.25, 0.10])
-    
-    elif vessel_group == 'Container Ship':
-        if origin_country in ['China', 'South Korea', 'Japan']:
-            return np.random.choice([
-                'Electronics', 'Consumer Goods', 'Auto Parts', 
-                'Machinery', 'Textiles'
-            ], p=[0.35, 0.25, 0.20, 0.15, 0.05])  # Asia's export mix
-        elif origin_country in ['Germany', 'Netherlands', 'Belgium']:
-            return np.random.choice([
-                'Machinery', 'Auto Parts', 'Chemical Products', 
-                'Consumer Goods', 'Food Products'
-            ], p=[0.35, 0.25, 0.20, 0.15, 0.05])  # European export mix
-        return np.random.choice([
-            'Consumer Goods', 'Machinery', 'Food Products',
-            'Chemical Products', 'Mixed Cargo'
-        ], p=[0.30, 0.25, 0.20, 0.15, 0.10])
-    
-    elif vessel_group == 'LNG Tanker':
-        return 'Liquefied Natural Gas'  # LNG tankers only carry LNG
-    
-    elif vessel_group == 'Chemical Tanker':
-        return np.random.choice([
-            'Organic Chemicals', 'Inorganic Chemicals',
-            'Vegetable Oils', 'Acids'
-        ], p=[0.40, 0.30, 0.20, 0.10])
-    
-    elif vessel_group == 'Vehicle Carrier':
-        return 'Vehicles'  # Car carriers only carry vehicles
-    
-    return 'General Cargo'  # Fallback for other vessel types
 
 def calculate_cargo_weight(vessel_group: str, cargo_type: str, origin_port: str, dest_port: str) -> float:
     """Calculate realistic cargo weight based on vessel type and cargo"""
@@ -483,34 +463,12 @@ def calculate_cargo_weight(vessel_group: str, cargo_type: str, origin_port: str,
             'medium': 1.0,     # Medium pleasure craft
             'large': 2.0,      # Large pleasure craft
             'variance': 0.30
-        },
-        'Passenger Ship': {
-            'small': 200,      # Small passenger ferry
-            'medium': 500,     # Medium cruise ship
-            'large': 1000,     # Large cruise ship
-            'variance': 0.15   # Passenger luggage and supplies
-        },
-        'Tug': {
-            'small': 100,      # Small tug
-            'medium': 200,     # Medium tug
-            'large': 300,      # Large tug
-            'variance': 0.20   # Supplies and equipment
-        },
-        'Military': {
-            'small': 500,      # Small military vessel
-            'medium': 1000,    # Medium military vessel
-            'large': 2000,     # Large military vessel
-            'variance': 0.25   # Supplies and equipment
         }
     }
     
-    # If vessel group not in base_weights, try to map it to a known type
+    # If vessel group not in base_weights, use General Cargo Ship as default
     if vessel_group not in base_weights:
-        mapped_group = refine_vessel_type(vessel_group, "")  # Try to map to a known type
-        if mapped_group in base_weights:
-            vessel_group = mapped_group
-        else:
-            return 100.0  # Conservative default weight for unknown types
+        vessel_group = 'General Cargo Ship'
     
     # Select size based on port capacity
     port_size = min(
@@ -537,7 +495,7 @@ def calculate_cargo_weight(vessel_group: str, cargo_type: str, origin_port: str,
         base *= 1.1  # Full oil cargoes
     elif cargo_type == 'Vehicles':
         base *= 0.9  # Vehicle carriers rarely sail full
-    elif cargo_type == 'Electronics' or cargo_type == 'Consumer Goods':
+    elif cargo_type in ['Electronics', 'Consumer Goods']:
         base *= 0.85  # Lighter cargo types
     elif cargo_type == 'Liquefied Natural Gas':
         base *= 0.95  # LNG specific adjustment
@@ -551,6 +509,99 @@ def calculate_cargo_weight(vessel_group: str, cargo_type: str, origin_port: str,
     weight = max(min_weight, min(max_weight, weight))
     
     return round(weight, 2)
+
+def select_cargo_type(vessel_group: str, origin_country: str, dest_country: str) -> str:
+    """Select cargo type based on vessel group and real-world cargo flows"""
+    if vessel_group == 'Oil Tanker':
+        if origin_country in ['Saudi Arabia', 'UAE', 'Kuwait', 'Qatar', 'Oman']:
+            return np.random.choice(['Crude Oil', 'Petroleum Products'], p=[0.95, 0.05])
+        elif origin_country in ['Singapore', 'South Korea', 'Netherlands']:
+            return np.random.choice(['Petroleum Products', 'Fuel Oil'], p=[0.80, 0.20])
+        return np.random.choice(['Crude Oil', 'Petroleum Products', 'Fuel Oil'], p=[0.70, 0.20, 0.10])
+    
+    elif vessel_group == 'Bulk Carrier':
+        if origin_country == 'Australia':
+            return np.random.choice(['Iron Ore', 'Coal', 'Bauxite'], p=[0.70, 0.25, 0.05])
+        elif origin_country == 'Brazil':
+            return np.random.choice(['Iron Ore', 'Soybeans', 'Grain'], p=[0.80, 0.15, 0.05])
+        elif origin_country in ['USA', 'Canada']:
+            return np.random.choice(['Grain', 'Soybeans', 'Coal'], p=[0.50, 0.30, 0.20])
+        elif origin_country == 'South Africa':
+            return np.random.choice(['Coal', 'Iron Ore', 'Manganese'], p=[0.60, 0.25, 0.15])
+        return np.random.choice(['Coal', 'Grain', 'Iron Ore', 'Bauxite'], p=[0.35, 0.30, 0.25, 0.10])
+    
+    elif vessel_group == 'Container Ship':
+        if origin_country in ['China', 'South Korea', 'Japan']:
+            return np.random.choice([
+                'Electronics', 'Consumer Goods', 'Auto Parts', 
+                'Machinery', 'Textiles'
+            ], p=[0.35, 0.25, 0.20, 0.15, 0.05])
+        elif origin_country in ['Germany', 'Netherlands', 'Belgium']:
+            return np.random.choice([
+                'Machinery', 'Auto Parts', 'Chemical Products', 
+                'Consumer Goods', 'Food Products'
+            ], p=[0.35, 0.25, 0.20, 0.15, 0.05])
+        return np.random.choice([
+            'Consumer Goods', 'Machinery', 'Food Products',
+            'Chemical Products', 'Mixed Cargo'
+        ], p=[0.30, 0.25, 0.20, 0.15, 0.10])
+    
+    elif vessel_group == 'LNG Tanker':
+        return 'Liquefied Natural Gas'
+    
+    elif vessel_group == 'Chemical Tanker':
+        return np.random.choice([
+            'Organic Chemicals', 'Inorganic Chemicals',
+            'Vegetable Oils', 'Acids'
+        ], p=[0.40, 0.30, 0.20, 0.10])
+    
+    elif vessel_group == 'Vehicle Carrier':
+        return 'Vehicles'
+    
+    elif vessel_group == 'General Cargo Ship':
+        # Enhanced cargo categories for general cargo ships based on real-world data
+        if origin_country in ['China', 'South Korea', 'Japan', 'Taiwan']:
+            return np.random.choice([
+                'Steel Products', 'Industrial Equipment', 'Construction Materials',
+                'Metal Products', 'Paper Products', 'Wood Products',
+                'Agricultural Equipment', 'Project Cargo', 'Packaged Foods',
+                'Recycling Materials'
+            ], p=[0.20, 0.15, 0.15, 0.10, 0.10, 0.08, 0.08, 0.05, 0.05, 0.04])
+        
+        elif origin_country in ['Germany', 'Netherlands', 'Belgium', 'France']:
+            return np.random.choice([
+                'Industrial Machinery', 'Manufacturing Equipment', 'Steel Products',
+                'Chemical Products', 'Construction Materials', 'Paper Products',
+                'Agricultural Products', 'Project Cargo', 'Recycling Materials',
+                'Specialized Equipment'
+            ], p=[0.18, 0.15, 0.12, 0.12, 0.10, 0.10, 0.08, 0.06, 0.05, 0.04])
+        
+        elif origin_country in ['USA', 'Canada']:
+            return np.random.choice([
+                'Agricultural Equipment', 'Construction Materials', 'Industrial Machinery',
+                'Wood Products', 'Paper Products', 'Steel Products',
+                'Chemical Products', 'Project Cargo', 'Recycling Materials',
+                'Manufacturing Equipment'
+            ], p=[0.15, 0.15, 0.12, 0.12, 0.10, 0.10, 0.08, 0.08, 0.05, 0.05])
+        
+        else:
+            # Default distribution for other countries
+            return np.random.choice([
+                'Steel Products', 'Construction Materials', 'Industrial Equipment',
+                'Agricultural Products', 'Wood Products', 'Paper Products',
+                'Chemical Products', 'Project Cargo', 'Manufacturing Equipment',
+                'Recycling Materials'
+            ], p=[0.15, 0.15, 0.12, 0.12, 0.10, 0.10, 0.08, 0.08, 0.05, 0.05])
+    
+    # Default case (replacing 'Mixed Cargo' with specific cargo types)
+    return np.random.choice([
+        'Steel Products', 'Construction Materials', 'Industrial Equipment',
+        'Agricultural Products', 'Wood Products', 'Paper Products',
+        'Chemical Products', 'Project Cargo', 'Manufacturing Equipment',
+        'Recycling Materials', 'Metal Products', 'Specialized Equipment',
+        'Industrial Machinery', 'Packaged Foods', 'Textile Products'
+    ], p=[0.12, 0.10, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.06, 0.06,
+          0.05, 0.05, 0.03, 0.03, 0.02])
 
 def map_vessel_group(vessel_group: str) -> str:
     """Map AIS vessel groups to standardized vessel types"""
@@ -587,18 +638,11 @@ def refine_vessel_type(vessel_group: str, vessel_type_detailed: str) -> str:
     return map_vessel_group(vessel_group)
 
 def assign_route_and_cargo(vessel_group: str, vessel_type_detailed: str) -> Tuple[str, str, str, str, str, float]:
-    """
-    Assign route and cargo based on vessel type and real-world trade patterns
-    """
+    """Assign route and cargo based on vessel type and real-world trade patterns"""
     # First, refine the vessel type
     refined_vessel_type = refine_vessel_type(vessel_group, vessel_type_detailed)
     
-    # Debug print
-    print(f"Original vessel group: {vessel_group}")
-    print(f"Vessel type detailed: {vessel_type_detailed}")
-    print(f"Refined vessel type: {refined_vessel_type}")
-    
-    # Rest of the function remains the same, but use refined_vessel_type instead of vessel_group
+    # Trade route probabilities based on vessel type
     trade_routes = {
         'Container Ship': {
             'Asia-North America': 0.45,
@@ -606,7 +650,23 @@ def assign_route_and_cargo(vessel_group: str, vessel_type_detailed: str) -> Tupl
             'Europe-North America': 0.10,
             'Intra-Asia': 0.15
         },
-        # ... rest of trade routes ...
+        'Oil Tanker': {
+            'Middle East-Asia': 0.40,
+            'Middle East-Europe': 0.25,
+            'Americas-Asia': 0.20,
+            'Intra-Asia': 0.15
+        },
+        'Bulk Carrier': {
+            'Australia-Asia': 0.35,
+            'Brazil-Asia': 0.25,
+            'North America-Asia': 0.20,
+            'Africa-Asia': 0.20
+        },
+        'LNG Tanker': {
+            'Qatar-Asia': 0.40,
+            'Australia-Asia': 0.30,
+            'USA-Europe': 0.30
+        }
     }
     
     if refined_vessel_type in trade_routes:
@@ -622,14 +682,9 @@ def assign_route_and_cargo(vessel_group: str, vessel_type_detailed: str) -> Tupl
         while dest_country == origin_country:
             dest_country = select_country_for_vessel('Global', refined_vessel_type)
     
-    # Select cargo type based on refined vessel type
     cargo_type = select_cargo_type(refined_vessel_type, origin_country, dest_country)
-    
-    # Select ports
     origin_port = select_port_for_cargo(origin_country, cargo_type, refined_vessel_type)
     dest_port = select_port_for_cargo(dest_country, cargo_type, refined_vessel_type)
-    
-    # Calculate cargo weight
     cargo_weight = calculate_cargo_weight(refined_vessel_type, cargo_type, origin_port, dest_port)
     
     return (origin_country, origin_port, dest_country, dest_port, cargo_type, cargo_weight)
@@ -688,101 +743,212 @@ def adjust_port_weights(weights: List[float], ports: List[str], cargo_type: str,
     
     return adjusted_weights
 
-def assign_flag(vessel_group: str) -> str:
-    """
-    Assign a flag state based on vessel type and real-world distributions
-    """
-    # Flag state probabilities based on real-world data
-    FLAG_PROBABILITIES = {
-        'Panama': 0.16,
-        'Liberia': 0.13,
-        'Marshall Islands': 0.13,
-        'Hong Kong': 0.08,
-        'Singapore': 0.07,
-        'Malta': 0.06,
-        'China': 0.05,
-        'Bahamas': 0.04,
-        'Greece': 0.04,
-        'Japan': 0.03,
-        'Cyprus': 0.02,
-        'Other': 0.19
+def assign_flag(vessel_group: str, is_suspicious: bool = False) -> str:
+    """Assign a flag state based on vessel type and whether the vessel is suspicious"""
+    if is_suspicious:
+        # Flags often associated with suspicious activities
+        return np.random.choice([
+            'Honduras', 'Cambodia', 'Tanzania', 'Comoros', 
+            'Sao Tome and Principe', 'Vanuatu', 'Palau'
+        ])
+    
+    # Regular commercial vessels - removed 'Other' option
+    commercial_flags = {
+        'Panama': 0.20,
+        'Liberia': 0.15,
+        'Marshall Islands': 0.15,
+        'Hong Kong': 0.10,
+        'Singapore': 0.10,
+        'Malta': 0.08,
+        'China': 0.07,
+        'Bahamas': 0.05,
+        'Greece': 0.05,
+        'Japan': 0.05
     }
     
-    # Special cases for different vessel types
     if vessel_group == 'Fishing':
         return np.random.choice([
             'China', 'Japan', 'South Korea', 'USA', 'Spain', 
             'Taiwan', 'Norway', 'Indonesia'
-        ], p=[0.25, 0.15, 0.15, 0.10, 0.10, 0.10, 0.08, 0.07])
+        ])
     
     elif vessel_group == 'Pleasure Craft':
         return np.random.choice([
             'USA', 'UK', 'France', 'Italy', 'Greece', 
-            'Spain', 'Australia', 'Other'
-        ], p=[0.25, 0.15, 0.15, 0.10, 0.10, 0.10, 0.08, 0.07])
+            'Spain', 'Australia', 'Monaco'
+        ])
     
-    elif vessel_group == 'Oil Tanker':
-        return np.random.choice([
-            'Panama', 'Liberia', 'Marshall Islands', 'Greece', 
-            'Singapore', 'Malta', 'Other'
-        ], p=[0.20, 0.18, 0.15, 0.12, 0.10, 0.15, 0.10])
-    
-    elif vessel_group == 'Container Ship':
-        return np.random.choice([
-            'Panama', 'Liberia', 'Marshall Islands', 'Singapore', 
-            'Hong Kong', 'Malta', 'Other'
-        ], p=[0.22, 0.20, 0.15, 0.12, 0.11, 0.10, 0.10])
-    
-    # Default case uses general commercial shipping flag distribution
     return np.random.choice(
-        list(FLAG_PROBABILITIES.keys()),
-        p=list(FLAG_PROBABILITIES.values())
+        list(commercial_flags.keys()),
+        p=list(commercial_flags.values())
     )
 
+def analyze_dataset(df, title="Dataset Analysis"):
+    """Print comprehensive analysis of the dataset"""
+    print(f"\n{'='*20} {title} {'='*20}")
+    print(f"Total vessels: {len(df)}")
+    
+    # First, let's print the actual columns we have
+    print("\nAvailable columns:")
+    print(df.columns.tolist())
+    
+    # Then analyze based on available columns
+    try:
+        if 'VesselGroup' in df.columns:
+            print("\nVessel Group Distribution:")
+            print(df['VesselGroup'].value_counts())
+        elif 'VesselType' in df.columns:  # Assuming this might be the actual column name
+            print("\nVessel Type Distribution:")
+            print(df['VesselType'].value_counts())
+        
+        if 'Flag' in df.columns:
+            print("\nFlag Distribution (top 10):")
+            print(df['Flag'].value_counts().head(10))
+        
+        if 'Cargo_type' in df.columns:
+            print("\nCargo Type Distribution:")
+            print(df['Cargo_type'].value_counts())
+        
+        if 'Total_weight_cargo' in df.columns:
+            print("\nAverage Cargo Weight by Vessel Type:")
+            print(df.groupby('VesselType')['Total_weight_cargo'].mean())
+        
+        if 'Destination_port' in df.columns:
+            print("\nDestination Port Distribution (top 10):")
+            print(df['Destination_port'].value_counts().head(10))
+            
+    except Exception as e:
+        print(f"\nError in analysis: {str(e)}")
+        print("Some columns might not be available in the current dataset.")
+
+def create_suspicious_vessel_csv(df, output_dir="output"):
+    """Create suspicious vessels and save all dataset versions"""
+    try:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Make sure we have all required columns
+        required_columns = ['VesselGroup', 'Cargo_type', 'Total_weight_cargo']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Missing required columns: {missing_columns}")
+        
+        # Save original dataset
+        original_file = os.path.join(output_dir, "original_vessel_data.csv")
+        df.to_csv(original_file, index=False)
+        print(f"\nSaved original dataset to {original_file}")
+        
+        # Create clean and suspicious datasets
+        mask = df['VesselGroup'] != 'Not Available'
+        clean_df = df[mask].copy()
+        suspicious_df = df[~mask].copy()
+        
+        # Modify suspicious vessels according to requirements
+        n_suspicious = len(suspicious_df)
+        if n_suspicious > 0:
+            # Set vessel group to Pleasure Craft/Sailing
+            suspicious_df['VesselGroup'] = 'Pleasure Craft/Sailing'
+            
+            # Set cargo type to oil
+            suspicious_df['Cargo_type'] = 'Crude Oil'
+            
+            # Set cargo weight between 3 and 15
+            suspicious_df['Total_weight_cargo'] = np.random.uniform(3, 15, n_suspicious)
+            
+            # Set destination ports in US Gulf of Mexico
+            us_gulf_ports = MAJOR_PORTS['USA']['Gulf']
+            suspicious_df['Destination_port'] = np.random.choice(list(us_gulf_ports.keys()), n_suspicious)
+            suspicious_df['Destination_country'] = 'USA'
+            
+            # Set origin ports in Malaysia or India
+            origin_countries = ['Malaysia', 'India']
+            suspicious_df['Origin_country'] = np.random.choice(origin_countries, n_suspicious)
+            
+            # Set origin ports based on country
+            for country in origin_countries:
+                country_mask = suspicious_df['Origin_country'] == country
+                country_ports = list(MAJOR_PORTS[country]['Main'].keys())
+                suspicious_df.loc[country_mask, 'Origin_port'] = np.random.choice(country_ports, sum(country_mask))
+            
+            # Assign suspicious flags
+            suspicious_df['Flag'] = suspicious_df['VesselGroup'].apply(lambda x: assign_flag(x, is_suspicious=True))
+        
+        # Ensure clean vessels have valid ports and flags
+        clean_df['Flag'] = clean_df['VesselGroup'].apply(lambda x: assign_flag(x, is_suspicious=False))
+        
+        # For any missing ports/countries in clean data, assign defaults
+        missing_route_mask = (
+            clean_df['Origin_port'].isin(['Unknown', '']) | 
+            clean_df['Destination_port'].isin(['Unknown', '']) |
+            clean_df['Origin_country'].isin(['Unknown', '']) | 
+            clean_df['Destination_country'].isin(['Unknown', ''])
+        )
+        
+        for idx in clean_df[missing_route_mask].index:
+            origin_country, origin_port, dest_country, dest_port, _, _ = assign_default_route()
+            clean_df.loc[idx, 'Origin_country'] = origin_country
+            clean_df.loc[idx, 'Origin_port'] = origin_port
+            clean_df.loc[idx, 'Destination_country'] = dest_country
+            clean_df.loc[idx, 'Destination_port'] = dest_port
+        
+        # Save datasets
+        clean_file = os.path.join(output_dir, "clean_vessel_data.csv")
+        suspicious_file = os.path.join(output_dir, "suspicious_vessels.csv")
+        combined_file = os.path.join(output_dir, "combined_vessel_data.csv")
+        
+        clean_df.to_csv(clean_file, index=False)
+        suspicious_df.to_csv(suspicious_file, index=False)
+        pd.concat([clean_df, suspicious_df]).to_csv(combined_file, index=False)
+        
+        print(f"Saved clean dataset to {clean_file}")
+        print(f"Saved suspicious dataset to {suspicious_file}")
+        print(f"Saved combined dataset to {combined_file}")
+        
+        return suspicious_df, clean_df, pd.concat([clean_df, suspicious_df])
+        
+    except Exception as e:
+        print(f"Error in create_suspicious_vessel_csv: {str(e)}")
+        raise
+
+def load_input_data(input_dir="inputs"):
+    """Load data from input directory"""
+    try:
+        # Check if input directory exists
+        if not os.path.exists(input_dir):
+            raise FileNotFoundError(f"Input directory '{input_dir}' not found.")
+        
+        # Define input file paths
+        ais_file = os.path.join(input_dir, "AIS_2023_12_31.csv")
+        vessel_types_file = os.path.join(input_dir, "VesselTypeCodes_Structured.csv")
+        
+        # Load the data
+        ais_df = pd.read_csv(ais_file)
+        vessel_types_df = pd.read_csv(vessel_types_file)
+        
+        print(f"\nSuccessfully loaded input files from {input_dir}/")
+        print(f"AIS data shape: {ais_df.shape}")
+        print(f"Vessel types data shape: {vessel_types_df.shape}")
+        
+        # Print column names to help with debugging
+        print("\nAIS data columns:")
+        print(ais_df.columns.tolist())
+        print("\nVessel types columns:")
+        print(vessel_types_df.columns.tolist())
+        
+        return ais_df, vessel_types_df
+        
+    except Exception as e:
+        print(f"Error loading input data: {str(e)}")
+        raise
+
+# Usage:
 if __name__ == "__main__":
-    # Load and process the data
-    file_path = "AIS_2023_12_31.csv"
-    result = load_and_clean_ais_data(file_path)
-    
-    # Print distributions
-    print(f"\nTotal number of unique vessels: {len(result)}")
-    
-    print("\nDistribution of vessel groups:")
-    print(result['VesselGroup'].value_counts())
-    
-    print("\nDistribution of vessel detailed types:")
-    print(result['VesselTypeDetailed'].value_counts())
-    
-    print("\nTop 10 Origin Countries:")
-    print(result['Origin_country'].value_counts().head(10))
-    
-    print("\nTop 10 Destination Countries:")
-    print(result['Destination_country'].value_counts().head(10))
-    
-    print("\nTop 10 Flags:")
-    print(result['Flag'].value_counts().head(10))
-    
-    print("\nTop 10 Cargo Types:")
-    print(result['Cargo_type'].value_counts().head(10))
-    
-    print("\nCargo Weight Statistics (in metric tons):")
-    print(result['Total_weight_cargo'].describe())
-    
-    # Additional cross-tabulation analysis
-    print("\nAverage cargo weight by vessel group:")
-    print(result.groupby('VesselGroup')['Total_weight_cargo'].mean().sort_values(ascending=False))
-    
-    print("\nMost common routes (Origin -> Destination):")
-    routes = result.groupby(['Origin_country', 'Destination_country']).size().sort_values(ascending=False)
-    print(routes.head(10))
-    
-    # Save the processed data to CSV
-    output_file = "processed_vessel_data.csv"
-    result.to_csv(output_file, index=False)
-    print(f"\nProcessed data saved to {output_file}")
-    
-    # Create the GUI application
-    app = QApplication(sys.argv)
-    window = DataFrameViewer(result)
-    window.show()
-    sys.exit(app.exec())
+    try:
+        # Load and clean AIS data with vessel type mapping
+        df = load_and_clean_ais_data()
+        
+        # Process and create suspicious vessels
+        suspicious_vessels, clean_vessels, combined_vessels = create_suspicious_vessel_csv(df)
+        
+    except Exception as e:
+        print(f"Error in main execution: {str(e)}")
